@@ -1,505 +1,443 @@
 import streamlit as st
-import numpy as np
-import pandas as pd
-import cv2
-import torch
-import requests
 
-from io import BytesIO
-from PIL import Image, ImageDraw
+from PIL import Image
 
-from sklearn.cluster import KMeans
-from sklearn.metrics.pairwise import cosine_similarity
+from vision import analyze_image
 
-from skimage.color import rgb2lab, lab2rgb
-
-from transformers import (
-    CLIPProcessor,
-    CLIPModel
+from recommendations import (
+    fashion_recommendation,
+    generate_outfit
 )
 
-from ultralytics import YOLO
+from wardrobe import (
+    load_wardrobe,
+    save_wardrobe,
+    add_item,
+    wardrobe_statistics,
+    increase_wear,
+    toggle_favorite
+)
+
+from gallery import (
+    get_season_collection,
+    random_inspiration
+)
+
+import ui
 
 
-# --------------------------------------------------
+
+# -------------------------------------------------------
 # PAGE CONFIG
-# --------------------------------------------------
+# -------------------------------------------------------
 
 st.set_page_config(
-    page_title="fitmax AI Fashion Engine",
+    page_title="FitMax Closet",
+    page_icon="FitMax",
     layout="wide"
 )
 
 
-# --------------------------------------------------
-# PREMIUM UI STYLE
-# --------------------------------------------------
-
-st.markdown(
-"""
-<style>
-
-body {
-    font-family: Inter, sans-serif;
-}
-
-
-.stApp {
-
-    background:
-    linear-gradient(
-        135deg,
-        #f4f0ff,
-        #ffffff
-    );
-
-}
-
-
-.dashboard-card {
-
-    background:white;
-
-    padding:25px;
-
-    border-radius:22px;
-
-    box-shadow:
-    0 15px 40px rgba(0,0,0,.08);
-
-    margin-bottom:20px;
-
-    transition:.25s;
-
-}
-
-
-.dashboard-card:hover {
-
-    transform:
-    translateY(-5px);
-
-}
-
-
-.title {
-
-font-size:42px;
-font-weight:900;
-
-}
-
-
-.subtitle {
-
-font-size:18px;
-
-color:#666;
-
-}
-
-
-.badge {
-
-background:#111;
-
-color:white;
-
-padding:8px 15px;
-
-border-radius:20px;
-
-font-size:13px;
-
-}
-
-
-</style>
-""",
-unsafe_allow_html=True
-)
+ui.load_theme()
 
 
 
-# --------------------------------------------------
-# MODEL LOADING
-# --------------------------------------------------
-
-
-@st.cache_resource
-def load_clip():
-
-    model = CLIPModel.from_pretrained(
-        "openai/clip-vit-base-patch32"
-    )
-
-    processor = CLIPProcessor.from_pretrained(
-        "openai/clip-vit-base-patch32"
-    )
-
-    return model, processor
-
-
-
-@st.cache_resource
-def load_detector():
-
-    return YOLO(
-        "yolov8n.pt"
-    )
-
-
-
-clip_model, clip_processor = load_clip()
-
-detector = load_detector()
-
-
-
-# --------------------------------------------------
-# SESSION STORAGE
-# --------------------------------------------------
+# -------------------------------------------------------
+# SESSION STATE
+# -------------------------------------------------------
 
 if "wardrobe" not in st.session_state:
 
-    st.session_state.wardrobe = []
+    st.session_state.wardrobe = load_wardrobe()
 
 
 
-if "embeddings" not in st.session_state:
+# -------------------------------------------------------
+# HEADER
+# -------------------------------------------------------
 
-    st.session_state.embeddings = []
-
-
-
-# --------------------------------------------------
-# IMAGE HELPERS
-# --------------------------------------------------
+ui.header()
 
 
-def load_image(upload):
 
-    return Image.open(
-        upload
-    ).convert(
-        "RGB"
+# -------------------------------------------------------
+# NAVIGATION
+# -------------------------------------------------------
+
+page = ui.sidebar()
+
+
+
+# -------------------------------------------------------
+# DASHBOARD
+# -------------------------------------------------------
+
+if page == "Dashboard":
+
+    stats = wardrobe_statistics(
+        st.session_state.wardrobe
+    )
+
+    ui.metrics(
+        stats
+    )
+
+
+    st.divider()
+
+
+    ui.card(
+        "AI Fashion Assistant",
+        "Upload clothing images, analyze your style, and generate outfits from your closet."
+    )
+
+
+    st.subheader(
+        "Random Fashion Inspiration"
+    )
+
+
+    inspiration = random_inspiration()
+
+
+    st.write(
+        inspiration
     )
 
 
 
-def image_from_url(url):
+# -------------------------------------------------------
+# IMAGE ANALYSIS
+# -------------------------------------------------------
 
-    try:
+elif page == "Analyze Clothing":
 
-        r=requests.get(
-            url,
-            timeout=10
+    st.header(
+        "Clothing AI Analysis"
+    )
+
+
+    uploaded = st.file_uploader(
+        "Upload clothing image",
+        type=[
+            "png",
+            "jpg",
+            "jpeg"
+        ]
+    )
+
+
+    if uploaded:
+
+
+        image = Image.open(
+            uploaded
         )
 
-        return Image.open(
-            BytesIO(r.content)
-        ).convert("RGB")
 
-    except:
-
-        return None
-
-
-
-# --------------------------------------------------
-# COLOR AI
-# --------------------------------------------------
-
-
-def extract_palette(image, k=5):
-
-    img=np.array(
-        image.resize(
-            (100,100)
+        st.image(
+            image,
+            width=350
         )
-    )
 
 
-    lab=rgb2lab(
-        img
-    )
+        if st.button(
+            "Analyze Clothing"
+        ):
 
 
-    pixels=lab.reshape(
-        -1,
-        3
-    )
-
-
-    km=KMeans(
-        n_clusters=k,
-        random_state=42
-    )
-
-    km.fit(
-        pixels
-    )
-
-
-    centers=km.cluster_centers_
-
-    rgb=lab2rgb(
-        centers.reshape(
-            1,
-            k,
-            3
-        )
-    )[0]
-
-
-    rgb=np.clip(
-        rgb*255,
-        0,
-        255
-    ).astype(int)
-
-
-    return rgb
-
-
-
-def rgb_hex(color):
-
-    return "#%02x%02x%02x" % tuple(color)
-
-
-
-# --------------------------------------------------
-# CLOTHING DETECTION
-# --------------------------------------------------
-
-
-def detect_clothing(image):
-
-
-    results=detector(
-        np.array(image)
-    )
-
-
-    detected=[]
-
-
-    for result in results:
-
-        for box in result.boxes:
-
-
-            cls=int(
-                box.cls[0]
-            )
-
-            conf=float(
-                box.conf[0]
+            result = analyze_image(
+                image
             )
 
 
-            detected.append(
+            st.session_state.analysis = result
 
-                {
-                    "object":
-                    detector.names[cls],
 
-                    "confidence":
-                    round(conf,2)
-                }
+            st.success(
+                "Analysis complete"
+            )
+
+
+            st.write(
+                result
+            )
+
+
+    if "analysis" in st.session_state:
+
+
+        st.divider()
+
+
+        name = st.text_input(
+            "Clothing name"
+        )
+
+
+        category = st.selectbox(
+
+            "Category",
+
+            [
+
+                "Top",
+
+                "Bottom",
+
+                "Outerwear",
+
+                "Shoes",
+
+                "Accessory",
+
+                "Full Outfit"
+
+            ]
+
+        )
+
+
+        style = st.text_input(
+            "Style",
+            value="Smart Casual"
+        )
+
+
+        if st.button(
+            "Save To Closet"
+        ):
+
+
+            st.session_state.wardrobe = add_item(
+
+                st.session_state.wardrobe,
+
+                name,
+
+                category,
+
+                style,
+
+                st.session_state.analysis
 
             )
 
 
-    return detected
+            save_wardrobe(
 
+                st.session_state.wardrobe
 
-
-# --------------------------------------------------
-# CLIP EMBEDDINGS
-# --------------------------------------------------
-
-
-def get_embedding(image):
-
-
-    inputs=clip_processor(
-
-        images=image,
-
-        return_tensors="pt"
-
-    )
-
-
-    with torch.no_grad():
-
-        features=clip_model.get_image_features(
-            **inputs
-        )
-
-
-    features=features / features.norm(
-        dim=-1,
-        keepdim=True
-    )
-
-
-    return features.cpu().numpy()
-
-
-
-# --------------------------------------------------
-# STYLE AI
-# --------------------------------------------------
-
-
-STYLE_LIBRARY={
-
-
-"Minimal Luxury":
-
-[
-"white shirt",
-"black trousers",
-"tailored coat",
-"clean fashion"
-],
-
-
-"Streetwear":
-
-[
-"oversized hoodie",
-"sneakers",
-"baggy jeans",
-"urban outfit"
-],
-
-
-"Formal":
-
-[
-"business suit",
-"evening dress",
-"formal clothing"
-],
-
-
-"Vacation":
-
-[
-"linen shirt",
-"summer outfit",
-"resort wear"
-]
-
-
-}
-
-
-
-def classify_style(image):
-
-
-    image_vector=get_embedding(
-        image
-    )
-
-
-    scores={}
-
-
-    for style,examples in STYLE_LIBRARY.items():
-
-
-        text_inputs=clip_processor(
-
-            text=examples,
-
-            return_tensors="pt",
-
-            padding=True
-
-        )
-
-
-        with torch.no_grad():
-
-            text_features=clip_model.get_text_features(
-                **text_inputs
             )
 
 
-        text_features/=text_features.norm(
-            dim=-1,
-            keepdim=True
+            st.success(
+                "Saved"
+            )
+
+
+
+# -------------------------------------------------------
+# OUTFIT GENERATOR
+# -------------------------------------------------------
+
+elif page == "Outfit Generator":
+
+
+    st.header(
+        "AI Outfit Generator"
+    )
+
+
+    style = st.selectbox(
+
+        "Choose style",
+
+        [
+
+            "Minimal Luxury",
+
+            "Smart Casual",
+
+            "Streetwear / Layered",
+
+            "Dark Academia",
+
+            "Bold Statement"
+
+        ]
+
+    )
+
+
+    if st.button(
+        "Generate Outfit"
+    ):
+
+
+        outfit = generate_outfit(
+            style
         )
 
 
-        score=torch.mean(
+        ui.outfit_card(
+            outfit
+        )
 
-            torch.tensor(
 
-                cosine_similarity(
 
-                    image_vector,
+# -------------------------------------------------------
+# CLOSET
+# -------------------------------------------------------
 
-                    text_features.numpy()
+elif page == "My Closet":
+
+
+    st.header(
+        "My Digital Closet"
+    )
+
+
+    if not st.session_state.wardrobe:
+
+        st.info(
+            "Your closet is empty."
+        )
+
+
+    for item in st.session_state.wardrobe:
+
+
+        ui.wardrobe_item(
+            item
+        )
+
+
+        col1, col2 = st.columns(
+            2
+        )
+
+
+        with col1:
+
+            if st.button(
+                "Wear +1",
+                key=f"wear_{item['id']}"
+            ):
+
+                increase_wear(
+
+                    st.session_state.wardrobe,
+
+                    item["id"]
 
                 )
 
+
+                save_wardrobe(
+
+                    st.session_state.wardrobe
+
+                )
+
+
+                st.rerun()
+
+
+        with col2:
+
+            if st.button(
+                "Favorite",
+                key=f"fav_{item['id']}"
+            ):
+
+                toggle_favorite(
+
+                    st.session_state.wardrobe,
+
+                    item["id"]
+
+                )
+
+
+                save_wardrobe(
+
+                    st.session_state.wardrobe
+
+                )
+
+
+                st.rerun()
+
+
+
+# -------------------------------------------------------
+# STYLE GALLERY
+# -------------------------------------------------------
+
+elif page == "Style Gallery":
+
+
+    st.header(
+        "Fashion Gallery"
+    )
+
+
+    season = st.selectbox(
+
+        "Season",
+
+        [
+
+            "Spring",
+
+            "Summer",
+
+            "Autumn",
+
+            "Winter"
+
+        ]
+
+    )
+
+
+    looks = get_season_collection(
+        season
+    )
+
+
+    for look in looks:
+
+        ui.card(
+
+            look["name"],
+
+            ", ".join(
+                look["items"]
             )
 
         )
 
 
-        scores[style]=float(score)
+
+# -------------------------------------------------------
+# SETTINGS
+# -------------------------------------------------------
+
+elif page == "Settings":
 
 
-
-    return max(
-        scores,
-        key=scores.get
-    ), scores
+    st.header(
+        "Settings"
+    )
 
 
-
-# --------------------------------------------------
-# HEADER
-# --------------------------------------------------
-
-
-st.markdown(
-"""
-<div class="title">
-fitmax AI Fashion Engine
-</div>
-
-<div class="subtitle">
-Computer vision powered wardrobe intelligence
-</div>
-
-<br>
-""",
-
-unsafe_allow_html=True
-)
+    st.write(
+        "FitMax lightweight AI mode enabled."
+    )
 
 
-
-# --------------------------------------------------
-# NAVIGATION
-# --------------------------------------------------
-
-tabs=st.tabs(
-
-[
-"AI Scanner",
-"Fashion Library",
-"Wardrobe",
-"Style Intelligence"
-]
-
-)
+    st.write(
+        "No Torch required."
+    )
